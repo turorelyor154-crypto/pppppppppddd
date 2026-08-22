@@ -15,6 +15,7 @@ BOT_TOKEN = "8612213994:AAFqPR7TxDFdqMTZTWNXv0vcAg6bbRzWvOM"
 
 import logging
 import os
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from io import BytesIO
@@ -380,11 +381,20 @@ def get_token() -> str:
     token = os.environ.get("BOT_TOKEN")
     if token:
         return token.strip()
-    # 3) Ikkalasi ham bo'lmasa, terminaldan so'raydi
-    token = input("Telegram bot TOKEN'ni kiriting (@BotFather'dan olingan): ").strip()
-    while not token:
-        token = input("Token bo'sh bo'lmasligi kerak. Qayta kiriting: ").strip()
-    return token
+    # 3) Terminal mavjud bo'lsa (kompyuterda qo'lda ishga tushirilsa) so'raydi.
+    #    Serverda (terminal yo'q joyda) input() abadiy osilib qolib,
+    #    dasturni qayta-qayta qulatib yuborishi mumkin — shuning uchun
+    #    bunday holatda darhol tushunarli xato bilan to'xtaymiz.
+    if sys.stdin is not None and sys.stdin.isatty():
+        token = input("Telegram bot TOKEN'ni kiriting (@BotFather'dan olingan): ").strip()
+        while not token:
+            token = input("Token bo'sh bo'lmasligi kerak. Qayta kiriting: ").strip()
+        return token
+    log.error(
+        "BOT_TOKEN topilmadi! Faylning yuqorisidagi BOT_TOKEN qatoriga tokenni yozing "
+        "yoki server sozlamalarida BOT_TOKEN muhit o'zgaruvchisini qo'shing."
+    )
+    sys.exit(1)
 
 
 def main():
