@@ -1,18 +1,22 @@
 # =====================================================================
 # BUXGALTERIYA HISOB-KITOB TELEGRAM BOTI
 # =====================================================================
-# ISHGA TUSHIRISH (terminalda):
+# ISHGA TUSHIRISH:
 #   1) python3 -m venv venv
 #      source venv/bin/activate        (Windows: venv\Scripts\activate)
 #   2) pip install python-telegram-bot pillow
-#   3) python3 bot.py
-#   4) Terminal token so'raydi — @BotFather bergan tokenni shu yerga
-#      yozib, Enter bosing (fayl ichiga token yozilmaydi).
+#   3) Pastdagi BOT_TOKEN qatoriga @BotFather bergan tokeningizni yozing
+#   4) python3 bot.py
 #   5) Telegram'da botga /start yuboring.
 # =====================================================================
 
+# 👇 BOT TOKENNI SHU YERGA YOZING (tirnoqlar ichida)
+BOT_TOKEN = "8612213994:AAFqPR7TxDFdqMTZTWNXv0vcAg6bbRzWvOM"
+
 import logging
 import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from io import BytesIO
 
 from PIL import Image, ImageDraw, ImageFont
@@ -26,6 +30,30 @@ from telegram.ext import (
     filters,
 )
 
+
+# =====================================================================
+# Render.com'ning bepul "Web Service" tarifi ishlashi uchun portni
+# tinglab turadigan soxta HTTP server. Bot o'zi Telegram bilan
+# "polling" orqali ishlaydi, lekin Render web-service HTTP porti ochiq
+# turishini talab qiladi — shuning uchun fonda shu kichik serverni
+# ham ishga tushiramiz.
+# =====================================================================
+class _PingHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Bot ishlayapti")
+
+    def log_message(self, format, *args):
+        pass  # konsolni keraksiz log bilan to'ldirmaslik uchun
+
+
+def start_ping_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), _PingHandler)
+    server.serve_forever()
+
 # =====================================================================
 # 2) Excel jadvalidan olingan mahsulotlar (Goods / composition / Expiry /
 #    packs / Price / 12% QQS / VAT bilan narx). Faqat "Soni" (miqdor)
@@ -37,15 +65,15 @@ PRODUCTS = [
         "code": "aa",
         "name": "Cardoz 25 mg Tab",
         "composition": "Carvedilol",
-        "expiry": "01.11.2026",
+        "expiry": "Nov.26",
         "packs": "2x14 Tab",
         "price": 84235.05,
     },
     {
         "code": "bb",
-        "name": "Cartiflex №10 Sachet",
+        "name": "Cartiflex  №10 Sachet",
         "composition": "collagen peptide",
-        "expiry": "01.11.2026",
+        "expiry": "Nov.26",
         "packs": "10 Sachet",
         "price": 133928.57,
     },
@@ -53,7 +81,7 @@ PRODUCTS = [
         "code": "cc",
         "name": "Nutrifiber 200 mg tab",
         "composition": "Inulin, Maltodextrin, PHGG",
-        "expiry": "01.11.2027",
+        "expiry": "Nov.27",
         "packs": "200 Gm",
         "price": 111607.14,
     },
@@ -61,13 +89,16 @@ PRODUCTS = [
         "code": "gg",
         "name": "Immard 200 mg №30 Tab",
         "composition": "Hydroxychloroquine sulfate",
-        "expiry": "01.09.2029",
+        "expiry": "Sep.29",
         "packs": "3x10 Tab",
         "price": 29569.87,
     },
 ]
 
 VAT_RATE = 0.12  # 12% QQS, Excel'dagi kabi
+
+# Excel shablonidagi kabi doim bir xil turadigan pastki matn (kontakt)
+FOOTER_TEXT = "carewell   телефон: + 998 90 316 92 22"
 
 # Suhbat bosqichlari: 0 = firma nomi, keyingilari — har bir mahsulot uchun son
 NAME_STATE = 0
@@ -199,53 +230,47 @@ def load_font(bold: bool, size: int):
 
 
 def build_table_image(rows, total, company_name: str = "") -> BytesIO:
-    # Ustunlar: №, Mahsulot, Tarkibi, Yaroqlilik, Qadoq, Narxi, 12% QQS, QQS bilan, Soni, Summa
+    # Ustunlar Excel shablonidagi tartibda: №, Goods, composition, Expiry,
+    # packs, Price, 12% QQS, ^VAT, (soni — sarlavhasiz ustun), Amount
     headers = [
-        "№", "Mahsulot", "Tarkibi", "Yaroqlilik", "Qadoq",
-        "Narxi", "12% QQS", "QQS bilan", "Soni", "Summa",
+        "№", "Goods", "composition", "Expiry", "packs",
+        "Price", "12% QQS", "^VAT", "", "Amount",
     ]
-    col_w = [40, 220, 220, 100, 90, 110, 90, 110, 70, 130]
-    row_h = 44
-    header_h = 50
-    title_h = 40 if company_name else 0
+    col_w = [40, 200, 200, 90, 90, 100, 90, 100, 60, 120]
+    row_h = 40
+    header_h = 46
+    title_h = 46
     margin = 20
+    table_w = sum(col_w)
 
-    width = sum(col_w) + margin * 2
-    # +2 qo'shimcha qator: 50% va 100%
-    height = title_h + header_h + row_h * (len(rows) + 1 + 2) + margin * 2 + 20
+    n_rows = len(rows)
+    height = title_h + header_h + row_h * (n_rows + 1 + 2) + margin * 2 + 20
 
-    img = Image.new("RGB", (width, height), "white")
+    img = Image.new("RGB", (table_w + margin * 2, height), "white")
     draw = ImageDraw.Draw(img)
 
-    f_header = load_font(bold=True, size=15)
-    f_cell = load_font(bold=False, size=14)
-    f_total = load_font(bold=True, size=16)
-    f_title = load_font(bold=True, size=20)
+    f_header = load_font(bold=True, size=14)
+    f_cell = load_font(bold=False, size=13)
+    f_total = load_font(bold=True, size=15)
+    f_title = load_font(bold=True, size=26)
 
     x0, y0 = margin, margin
 
-    if company_name:
-        draw.text((x0, y0), company_name, fill="black", font=f_title)
-        y0 += title_h
+    def col_x(i):
+        return x0 + sum(col_w[:i])
 
-    def draw_row(y, cells, font, header=False, bold_last=False):
-        x = x0
-        fill = (221, 235, 247) if header else "white"
-        for i, text in enumerate(cells):
-            w = col_w[i]
-            draw.rectangle([x, y, x + w, y + row_h if not header else y + header_h],
-                           outline="black", width=1, fill=fill)
-            h = header_h if header else row_h
-            use_font = f_total if (bold_last and i == len(cells) - 1) else font
-            # matnni katakka joylashtirish, agar uzun bo'lsa qatorga bo'lib yozamiz
-            _draw_wrapped(draw, text, x + 4, y, w - 8, h, use_font)
-            x += w
+    def box(x, y, w, h, fill="white"):
+        draw.rectangle([x, y, x + w, y + h], outline="black", width=1, fill=fill)
 
-    def _draw_wrapped(draw, text, x, y, w, h, font):
+    def center_text(x, y, w, h, text, font, bold_color="black"):
+        tw = draw.textlength(str(text), font=font)
+        th = font.size
+        draw.text((x + (w - tw) / 2, y + (h - th) / 2), str(text), fill=bold_color, font=font)
+
+    def _draw_wrapped(x, y, w, h, text, font):
         text = str(text)
         words = text.split(" ")
-        lines = []
-        cur = ""
+        lines, cur = [], ""
         for word in words:
             test = (cur + " " + word).strip()
             if draw.textlength(test, font=font) <= w:
@@ -256,49 +281,67 @@ def build_table_image(rows, total, company_name: str = "") -> BytesIO:
                 cur = word
         if cur:
             lines.append(cur)
-        if not lines:
-            lines = [""]
-        lines = lines[:3]
+        lines = lines[:3] if lines else [""]
         total_text_h = len(lines) * (font.size + 4)
         ty = y + (h - total_text_h) / 2
         for line in lines:
-            draw.text((x, ty), line, fill="black", font=font)
+            draw.text((x + 4, ty), line, fill="black", font=font)
             ty += font.size + 4
 
-    # sarlavha
-    draw_row(y0, headers, f_header, header=True)
-    y = y0 + header_h
+    # ---- 1) Sarlavha qatori: firma nomi (katta), Excel'dagidek faqat
+    #        № + Goods + composition + Expiry + packs ustunlarini egallaydi
+    title_w = sum(col_w[:5])
+    box(x0, y0, title_w, title_h, fill="white")
+    if company_name:
+        center_text(x0, y0, title_w, title_h, company_name.upper(), f_title)
+    for i in range(5, 10):
+        box(col_x(i), y0, col_w[i], title_h)
+    y = y0 + title_h
 
+    # ---- 2) Ustun sarlavhalari
+    for i, h_text in enumerate(headers):
+        box(col_x(i), y, col_w[i], header_h, fill=(255, 255, 255))
+        center_text(col_x(i), y, col_w[i], header_h, h_text, f_header)
+    y += header_h
+
+    # ---- 3) Mahsulot qatorlari
     for idx, r in enumerate(rows, start=1):
+        qty_str = fmt(r["qty"]).rstrip("0").rstrip(".") if "." in fmt(r["qty"]) else fmt(r["qty"])
         cells = [
-            str(idx),
-            r["name"],
-            r["composition"],
-            r["expiry"],
-            r["packs"],
-            fmt(r["price"]),
-            fmt(r["vat"]),
-            fmt(r["price_with_vat"]),
-            fmt(r["qty"]).rstrip("0").rstrip(".") if "." in fmt(r["qty"]) else fmt(r["qty"]),
-            fmt(r["amount"]),
+            str(idx), r["name"], r["composition"], r["expiry"], r["packs"],
+            fmt(r["price"]), fmt(r["vat"]), fmt(r["price_with_vat"]), qty_str, fmt(r["amount"]),
         ]
-        draw_row(y, cells, f_cell)
+        for i, text in enumerate(cells):
+            box(col_x(i), y, col_w[i], row_h)
+            if i in (1, 2):  # Goods, composition — chapga tekislab, uzun matnni bo'lib yozamiz
+                _draw_wrapped(col_x(i), y, col_w[i] - 8, row_h, text, f_cell)
+            else:
+                center_text(col_x(i), y, col_w[i], row_h, text, f_cell)
         y += row_h
 
-    # Jami, 50% va 100% qatorlari
+    # ---- 4) Jami qatori (Excel'dagi O8 kabi — faqat Amount ustunida raqam)
+    box(x0, y, table_w, row_h)
+    center_text(col_x(9), y, col_w[9], row_h, fmt(total), f_total)
+    y += row_h
+
+    # ---- 5) Pastki qism: chap tomonda doimiy kontakt matni (2 qator balandlikda),
+    #        o'ng tomonda 50% / 100% qatorlari
+    footer_h = row_h * 2
+    footer_w = sum(col_w[:6])  # №..Price ustunlarini egallaydi
+    box(x0, y, footer_w, footer_h)
+    center_text(x0, y, footer_w, footer_h, FOOTER_TEXT, f_total)
+
+    # 12% QQS va ^VAT ustunlari bo'sh (blank) qoladi, 2 qator balandlikda
+    blank_w = col_w[6] + col_w[7]
+    box(col_x(6), y, blank_w, footer_h)
+
     half = round(total * 0.5, 2)
-    summary_rows = [
-        (f"Jami: {fmt(total)} so'm", (255, 242, 204)),
-        (f"50%: {fmt(half)} so'm", (226, 239, 218)),
-        (f"100%: {fmt(total)} so'm", (226, 239, 218)),
-    ]
-    for label, color in summary_rows:
-        draw.rectangle([x0, y, x0 + sum(col_w), y + row_h], outline="black", width=1, fill=color)
-        draw.text(
-            (x0 + sum(col_w) - 4 - draw.textlength(label, font=f_total), y + (row_h - f_total.size) / 2),
-            label, fill="black", font=f_total,
-        )
-        y += row_h
+    for offset, (label, value) in enumerate([("50%", half), ("100%", total)]):
+        ry = y + offset * row_h
+        box(col_x(8), ry, col_w[8], row_h)
+        center_text(col_x(8), ry, col_w[8], row_h, label, f_total)
+        box(col_x(9), ry, col_w[9], row_h)
+        center_text(col_x(9), ry, col_w[9], row_h, fmt(value), f_total)
 
     buf = BytesIO()
     buf.name = "hisobot.png"
@@ -330,10 +373,14 @@ async def finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def get_token() -> str:
-    # Avval muhit o'zgaruvchisidan qidiradi (ixtiyoriy), bo'lmasa terminalda so'raydi
+    # 1) Avval faylning yuqorisidagi BOT_TOKEN qatoriga qaraydi
+    if BOT_TOKEN and BOT_TOKEN != "SIZNING_TOKEN_BU_YERGA":
+        return BOT_TOKEN.strip()
+    # 2) Bo'lmasa, muhit o'zgaruvchisidan qidiradi (masalan Render'da)
     token = os.environ.get("BOT_TOKEN")
     if token:
         return token.strip()
+    # 3) Ikkalasi ham bo'lmasa, terminaldan so'raydi
     token = input("Telegram bot TOKEN'ni kiriting (@BotFather'dan olingan): ").strip()
     while not token:
         token = input("Token bo'sh bo'lmasligi kerak. Qayta kiriting: ").strip()
@@ -342,6 +389,10 @@ def get_token() -> str:
 
 def main():
     bot_token = get_token()
+
+    # Render'ning bepul tarifi uchun port tinglovchi serverni fonda ishga tushiramiz
+    threading.Thread(target=start_ping_server, daemon=True).start()
+
     app = ApplicationBuilder().token(bot_token).build()
 
     states = {NAME_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, name_handler)]}
